@@ -1,0 +1,16 @@
+[build]
+  publish = "public"
+
+# Run the bus check every minute
+[[scheduled_functions]]
+  name    = "bus_check"
+  schedule = "* * * * *"   # every minute (cron syntax)
+
+# Python runtime for functions
+[functions]
+  directory        = "netlify/functions"
+  node_bundler     = "esbuild"
+  included_files   = ["netlify/functions/requirements.txt"]
+
+[functions.bus_check]
+  runtime = "python3.11"
