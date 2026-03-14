@@ -9,7 +9,9 @@ don't fire repeatedly for the same bus.
 
 import os
 import json
+import smtplib
 import requests
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
 
 # ── Config (set these as Netlify environment variables) ──────────────────────
@@ -18,10 +20,9 @@ STOP_ID       = os.environ.get("STOP_ID", "190004")        # OASA StopID
 ALERT_MINUTES = int(os.environ.get("ALERT_MINUTES", "5"))  # Alert when ≤ N min away
 COOLDOWN_MINS = int(os.environ.get("COOLDOWN_MINS", "15")) # Don't re-alert for N min
 
-TWILIO_SID    = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_TOKEN  = os.environ["TWILIO_AUTH_TOKEN"]
-TWILIO_FROM   = os.environ["TWILIO_WHATSAPP_FROM"]         # e.g. "whatsapp:+14155238886"
-ALERT_TO      = os.environ["ALERT_PHONE_NUMBER"]           # e.g. "whatsapp:+306912345678"
+GMAIL_ADDRESS    = os.environ["GMAIL_ADDRESS"]       # your Gmail e.g. costa@gmail.com
+GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASSWORD"]  # Google App Password
+ALERT_EMAIL      = os.environ["ALERT_EMAIL"]         # where to send alerts
 
 # Netlify Blobs (for cooldown state across invocations)
 NETLIFY_TOKEN    = os.environ.get("NETLIFY_TOKEN", "")
@@ -101,14 +102,15 @@ def get_arrivals(stop_id: str) -> list[dict]:
     return resp.json() or []
 
 
-# ── Twilio WhatsApp ───────────────────────────────────────────────────────────
-def send_whatsapp(message: str):
-    from twilio.rest import Client
-    Client(TWILIO_SID, TWILIO_TOKEN).messages.create(
-        body=message,
-        from_=TWILIO_FROM,
-        to=ALERT_TO,
-    )
+# ── Gmail SMTP ────────────────────────────────────────────────────────────────
+def send_email(message: str):
+    msg = MIMEText(message)
+    msg["Subject"] = f"🚌 Bus {LINE_NUMBER} arriving soon!"
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = ALERT_EMAIL
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(GMAIL_ADDRESS, GMAIL_APP_PASS)
+        smtp.send_message(msg)
 
 
 # ── Handler ───────────────────────────────────────────────────────────────────
@@ -146,7 +148,7 @@ def handler(event, context):
 
         if minutes <= ALERT_MINUTES:
             direction = arrival.get("route_descr", "")
-            send_whatsapp(
+            send_email(
                 f"🚌 Bus {LINE_NUMBER} arriving in {minutes} minute(s)!\n"
                 f"Stop: {STOP_ID}\n"
                 f"Direction: {direction}"
