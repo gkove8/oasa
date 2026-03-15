@@ -1,10 +1,9 @@
 """
 Athens Bus Alert Bot — Netlify Scheduled Function
 Runs every minute via Netlify cron. Checks OASA Telematics for bus arrivals
-and sends a WhatsApp alert via Twilio when the bus is close.
+and sends an email alert when the bus is close.
 
-State (cooldown) is stored in a Netlify Blobs key-value store so alerts
-don't fire repeatedly for the same bus.
+State (cooldown) is stored in Netlify Blobs so alerts don't fire repeatedly.
 """
 
 import os
@@ -17,28 +16,58 @@ from datetime import datetime, timedelta, timezone
 # ── Config (set these as Netlify environment variables) ──────────────────────
 LINE_NUMBER   = os.environ.get("LINE_NUMBER", "608")       # e.g. "608", "Β9"
 STOP_ID       = os.environ.get("STOP_ID", "190004")        # OASA StopID
-ALERT_MINUTES = int(os.environ.get("ALERT_MINUTES", "5"))  # Alert when ≤ N min away
+ALERT_MINUTES = int(os.environ.get("ALERT_MINUTES", "5"))  # Alert when <= N min away
 COOLDOWN_MINS = int(os.environ.get("COOLDOWN_MINS", "15")) # Don't re-alert for N min
 
-GMAIL_ADDRESS    = os.environ["GMAIL_ADDRESS"]       # your Gmail e.g. costa@gmail.com
-GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASSWORD"]  # Google App Password
-ALERT_EMAIL      = os.environ["ALERT_EMAIL"]         # where to send alerts
+GMAIL_ADDRESS  = os.environ["GMAIL_ADDRESS"]       # your Gmail e.g. costa@gmail.com
+GMAIL_APP_PASS = os.environ["GMAIL_APP_PASSWORD"]  # Google App Password
+ALERT_EMAIL    = os.environ["ALERT_EMAIL"]         # where to send alerts
 
 # Netlify Blobs (for cooldown state across invocations)
-NETLIFY_TOKEN    = os.environ.get("NETLIFY_TOKEN", "")
-NETLIFY_SITE_ID  = os.environ.get("NETLIFY_SITE_ID", "")
-BLOB_STORE_NAME  = "bus-bot-state"
-BLOB_KEY         = f"cooldown-{LINE_NUMBER}-{STOP_ID}"
+NETLIFY_TOKEN   = os.environ.get("NETLIFY_TOKEN", "")
+NETLIFY_SITE_ID = os.environ.get("NETLIFY_SITE_ID", "")
+BLOB_STORE_NAME = "bus-bot-state"
+BLOB_KEY        = f"cooldown-{LINE_NUMBER}-{STOP_ID}"
 
 OASA_BASE = "http://telematics.oasa.gr/api/"
 
 
+# ── OASA API — all calls are POST requests with params in the URL ─────────────
+def oasa_post(act, p1=None, p2=None):
+    url = f"{OASA_BASE}?act={act}"
+    if p1:
+        url += f"&p1={p1}"
+    if p2:
+        url += f"&p2={p2}"
+    resp = requests.post(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_line_code(line_number):
+    lines = oasa_post("webGetLines")
+    for line in lines:
+        if line.get("LineID", "").strip() == line_number.strip():
+            return line["LineCode"]
+    return None
+
+
+def get_route_codes(line_code):
+    routes = oasa_post("webGetRoutes", p1=line_code)
+    return [str(r["RouteCode"]) for r in routes]
+
+
+def get_arrivals(stop_id):
+    result = oasa_post("getStopArrivals", p1=stop_id)
+    return result or []
+
+
 # ── Netlify Blobs helpers ─────────────────────────────────────────────────────
-def _blob_url(key: str) -> str:
+def _blob_url(key):
     return f"https://api.netlify.com/api/v1/blobs/{NETLIFY_SITE_ID}/{BLOB_STORE_NAME}/{key}"
 
 
-def get_blob(key: str) -> dict | None:
+def get_blob(key):
     try:
         resp = requests.get(
             _blob_url(key),
@@ -52,7 +81,7 @@ def get_blob(key: str) -> dict | None:
         return None
 
 
-def set_blob(key: str, value: dict):
+def set_blob(key, value):
     try:
         requests.put(
             _blob_url(key),
@@ -68,7 +97,7 @@ def set_blob(key: str, value: dict):
 
 
 # ── Cooldown logic ────────────────────────────────────────────────────────────
-def is_in_cooldown() -> bool:
+def is_in_cooldown():
     state = get_blob(BLOB_KEY)
     if not state or "last_alert" not in state:
         return False
@@ -80,32 +109,10 @@ def set_cooldown():
     set_blob(BLOB_KEY, {"last_alert": datetime.now(timezone.utc).isoformat()})
 
 
-# ── OASA API ──────────────────────────────────────────────────────────────────
-def get_line_code(line_number: str) -> str | None:
-    resp = requests.get(f"{OASA_BASE}?act=webGetLines", timeout=10)
-    resp.raise_for_status()
-    for line in resp.json():
-        if line.get("LineID", "").strip() == line_number.strip():
-            return line["LineCode"]
-    return None
-
-
-def get_route_codes(line_code: str) -> list[str]:
-    resp = requests.get(f"{OASA_BASE}?act=webGetRoutes&p1={line_code}", timeout=10)
-    resp.raise_for_status()
-    return [str(r["RouteCode"]) for r in resp.json()]
-
-
-def get_arrivals(stop_id: str) -> list[dict]:
-    resp = requests.get(f"{OASA_BASE}?act=getStopArrivals&p1={stop_id}", timeout=10)
-    resp.raise_for_status()
-    return resp.json() or []
-
-
 # ── Gmail SMTP ────────────────────────────────────────────────────────────────
-def send_email(message: str):
+def send_email(message):
     msg = MIMEText(message)
-    msg["Subject"] = f"🚌 Bus {LINE_NUMBER} arriving soon!"
+    msg["Subject"] = f"Bus {LINE_NUMBER} arriving soon!"
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = ALERT_EMAIL
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
@@ -149,7 +156,7 @@ def handler(event, context):
         if minutes <= ALERT_MINUTES:
             direction = arrival.get("route_descr", "")
             send_email(
-                f"🚌 Bus {LINE_NUMBER} arriving in {minutes} minute(s)!\n"
+                f"Bus {LINE_NUMBER} arriving in {minutes} minute(s)!\n"
                 f"Stop: {STOP_ID}\n"
                 f"Direction: {direction}"
             )
